@@ -2,17 +2,31 @@
 
 Groq (Llama 3.1) + Supabase destekli yapay zeka influencer içerik üretim sistemi.
 
-## Kurulum
+## 📁 Dosya Yapısı
+
+```
+influencer_ai/
+├── ece_ai.py            # Ana içerik üretici
+├── scheduler.py         # Zamanlayıcı (günlük otomatik post)
+├── video_generator.py   # Görselden video üretici
+├── supabase_schema.sql  # Veritabanı şeması
+├── requirements.txt
+├── .env.example
+└── .gitignore
+```
+
+## ⚙️ Kurulum
 
 ```bash
-git clone <repo-url>
-cd influencer_ai
 pip install -r requirements.txt
 cp .env.example .env   # keyleri doldur
 ```
 
-## Kullanım
+Supabase SQL editöründe `supabase_schema.sql` dosyasını çalıştır.
 
+## 🚀 Kullanım
+
+### İçerik Üretme
 ```bash
 python ece_ai.py                        # rastgele tema ile post üret
 python ece_ai.py --dry-run              # supabase'e kaydetmeden test et
@@ -20,11 +34,46 @@ python ece_ai.py --theme "Bugün..."     # özel tema gir
 python ece_ai.py --recent               # son 5 postu listele
 ```
 
-## Supabase Kurulum
+### Zamanlayıcı
+```bash
+python scheduler.py                     # zamanlayıcıyı başlat (sürekli çalışır)
+python scheduler.py --now               # hemen bir post üret (test)
+python scheduler.py --status            # son 10 postu listele
+```
 
-`supabase_schema.sql` dosyasını Supabase SQL editöründe çalıştır.
+Varsayılan takvim: **09:00 / 13:00 / 19:00** her gün
+`scheduler.py` içindeki `DAILY_SCHEDULE` sözlüğünden saatleri değiştirebilirsin.
 
-## Ortam Değişkenleri
+### Video Üretme
+```bash
+# Manuel mod (Kling/Hailuo'dan URL al, Supabase'e kaydet)
+python video_generator.py --method manuel
 
-`.env.example` dosyasını `.env` olarak kopyalayıp keyleri doldur.
-`.env` dosyasını **asla** commit'leme.
+# Replicate ile otomatik (~$0.02/video)
+python video_generator.py --method replicate
+
+# Tek bir görsel için video üret
+python video_generator.py --method replicate --image-url https://...
+```
+
+## 🔄 Tam Pipeline
+
+```
+1. ece_ai.py        → Caption + hashtag + image_prompt üret, Supabase'e kaydet
+2. Görsel üretici   → image_prompt ile görsel üret
+3. video_generator  → Görselden kısa video üret (Kling/Hailuo/Replicate)
+4. scheduler.py     → Hepsini otomatik zamanla
+5. Instagram API    → (Meta onayından sonra) otomatik yayınla
+```
+
+## 🎬 Ücretsiz Video Araçları
+
+| Araç | Limit | URL |
+|------|-------|-----|
+| Kling AI | Günde ~5 video | kling.ai |
+| Hailuo AI | Günde ~5 video | hailuoai.com |
+| Runway | Aylık 125 kredi | runwayml.com |
+
+## 🔐 Güvenlik
+
+`.env` dosyasını **asla** commit'leme — `.gitignore` ile korunuyor.
