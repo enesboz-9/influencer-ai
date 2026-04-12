@@ -1,0 +1,241 @@
+"""
+Ece - AI Influencer Post Generator
+Supabase + Groq (Llama 3.1) destekli içerik üretim sistemi.
+"""
+
+import os
+import json
+import logging
+import random
+from datetime import datetime
+from typing import Optional
+from dataclasses import dataclass, asdict
+
+from dotenv import load_dotenv
+from groq import Groq
+from supabase import create_client, Client
+
+# --- LOGGING ---
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S"
+)
+log = logging.getLogger(__name__)
+
+# --- ENV ---
+load_dotenv()
+
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", "").strip()
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
+
+# --- ECE'NİN PERSONA TANIMI ---
+ECE_PERSONA = """
+Sen Ece'sin. 27 yaşında, MSGSÜ İç Mimarlık mezunu bir İstanbul influencerısın.
+Kişiliğin:
+- Estetik vizyonu güçlü, minimalist ama sıcak
+- Zeki ve samimi, asla yapay görünmez
+- Sanat, mimari ve günlük yaşam arasında köprü kurar
+- Türkçe yazar, zaman zaman İngilizce kelimeler karıştırır (doğal bir şekilde)
+- Hashtagleri akıllıca kullanır, spam yapmaz
+- Hikaye anlatıcısı — her postun arkasında bir his veya düşünce var
+"""
+
+# --- POST TEMATİK KATEGORİLERİ ---
+POST_THEMES = [
+    "Bugün stüdyoda bir proje üzerinde çalışırken yaşadığın küçük bir 'aha!' anı",
+    "Sabah kahveni içerken aklına gelen mimari veya tasarım üzerine bir düşünce",
+    "İlham aldığın İstanbul'dan bir köşe veya detay",
+    "Yeni keşfettiğin bir material veya renk paleti",
+    "Haftanın yorgunluğunu attığın kişisel bir ritüel",
+    "Takipçilerine sormak istediğin estetik bir tercih sorusu",
+    "Tamamladığın küçük bir proje veya eskiz",
+    "Okuduğun bir kitaptan veya izlediğin bir filmden etkilenme",
+]
+
+# --- VERİ MODELİ ---
+@dataclass
+class EcePost:
+    image_prompt: str
+    caption: str
+    mood: str
+    hashtags: list[str]
+    theme: str
+    image_url: str = "PENDING_IMAGE"
+    status: str = "pending"
+    created_at: str = ""
+
+    def __post_init__(self):
+        if not self.created_at:
+            self.created_at = datetime.utcnow().isoformat()
+
+    def to_dict(self) -> dict:
+        d = asdict(self)
+        d["hashtags"] = json.dumps(self.hashtags, ensure_ascii=False)
+        return d
+
+
+# --- SERVİS BAŞLATICI ---
+def init_services() -> tuple[Client, Groq]:
+    missing = []
+    if not SUPABASE_URL: missing.append("SUPABASE_URL")
+    if not SUPABASE_KEY: missing.append("SUPABASE_KEY")
+    if not GROQ_API_KEY:  missing.append("GROQ_API_KEY")
+    if missing:
+        raise EnvironmentError(f"Eksik environment değişkenleri: {', '.join(missing)}")
+
+    supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+    groq_client = Groq(api_key=GROQ_API_KEY)
+    log.info("✅ Supabase ve Groq servisleri bağlandı.")
+    return supabase, groq_client
+
+
+# --- İÇERİK ÜRETME ---
+def generate_post_content(groq_client: Groq, theme: str) -> EcePost:
+    system_prompt = f"""
+{ECE_PERSONA}
+
+Görevin: Verilen temaya uygun bir Instagram postu planlamak.
+Çıktıyı SADECE saf JSON formatında ver. Kesinlikle Markdown blokları (```json) kullanma.
+
+JSON formatı:
+{{
+  "image_prompt": "Görsel üretici için detaylı İngilizce prompt (stil, ışık, kompozisyon içermeli)",
+  "caption": "Instagram caption, Ece'nin sesini yansıtmalı, 3-5 cümle, emojiler doğal kullanılmalı",
+  "mood": "Tek kelimeyle ruh hali (örn: nostaljik, enerjik, huzurlu)",
+  "hashtags": ["hashtag1", "hashtag2", "..."]
+}}
+
+Hashtag kuralları: 8-12 adet, Türkçe ve İngilizce karışık, # işareti olmadan yaz.
+"""
+
+    user_prompt = f"Tema: {theme}"
+
+    log.info(f"🧠 İçerik üretiliyor... Tema: '{theme[:60]}...'")
+
+    response = groq_client.chat.completions.create(
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user",   "content": user_prompt},
+        ],
+        model="llama-3.1-8b-instant",
+        temperature=0.85,
+        max_tokens=1024,
+    )
+
+    raw = response.choices[0].message.content.strip()
+
+    # Markdown temizliği (güvence)
+    raw = raw.replace("```json", "").replace("```", "").strip()
+
+    content = json.loads(raw)
+
+    return EcePost(
+        image_prompt=content["image_prompt"],
+        caption=content["caption"],
+        mood=content["mood"],
+        hashtags=content.get("hashtags", []),
+        theme=theme,
+    )
+
+
+# --- SUPABASE'E KAYDET ---
+def save_post(supabase: Client, post: EcePost) -> dict:
+    result = supabase.table("ece_posts").insert(post.to_dict()).execute()
+    return result.data[0] if result.data else {}
+
+
+# --- SUPABASE'DEN ÇEK ---
+def fetch_recent_posts(supabase: Client, limit: int = 5) -> list[dict]:
+    result = (
+        supabase.table("ece_posts")
+        .select("*")
+        .order("created_at", desc=True)
+        .limit(limit)
+        .execute()
+    )
+    return result.data or []
+
+
+# --- IMAGE URL GÜNCELLE ---
+def update_image_url(supabase: Client, post_id: int, image_url: str) -> None:
+    supabase.table("ece_posts").update({
+        "image_url": image_url,
+        "status": "ready"
+    }).eq("id", post_id).execute()
+    log.info(f"🖼️  Post #{post_id} görsel URL'i güncellendi.")
+
+
+# --- ANA FONKSİYON ---
+def run(
+    theme: Optional[str] = None,
+    dry_run: bool = False,
+) -> Optional[EcePost]:
+    """
+    Ece için bir post üretir ve Supabase'e kaydeder.
+
+    Args:
+        theme:   Özel tema girmek istersen. None ise rastgele seçilir.
+        dry_run: True ise veritabanına kaydetmeden sadece üretir ve ekrana basar.
+    """
+    try:
+        supabase, groq_client = init_services()
+    except EnvironmentError as e:
+        log.error(f"❌ {e}")
+        return None
+
+    selected_theme = theme or random.choice(POST_THEMES)
+
+    try:
+        post = generate_post_content(groq_client, selected_theme)
+    except json.JSONDecodeError as e:
+        log.error(f"❌ JSON parse hatası: {e}")
+        return None
+    except Exception as e:
+        log.error(f"❌ İçerik üretme hatası: {e}")
+        return None
+
+    # Ekrana yazdır
+    print("\n" + "="*60)
+    print("📸  ECE'NİN YENİ POSTU")
+    print("="*60)
+    print(f"🎭 Mood     : {post.mood}")
+    print(f"🎨 Tema     : {post.theme[:80]}")
+    print(f"\n📝 Caption  :\n{post.caption}")
+    print(f"\n🖼️  Image Prompt:\n{post.image_prompt}")
+    print(f"\n#️⃣  Hashtags : {' '.join(['#'+h for h in post.hashtags])}")
+    print("="*60 + "\n")
+
+    if dry_run:
+        log.info("🔵 Dry-run modu: Supabase'e kaydedilmedi.")
+        return post
+
+    try:
+        saved = save_post(supabase, post)
+        log.info(f"✅ Post Supabase'e kaydedildi. ID: {saved.get('id', '?')}")
+    except Exception as e:
+        log.error(f"❌ Kaydetme hatası: {e}")
+        return None
+
+    return post
+
+
+# --- ENTRY POINT ---
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Ece AI Influencer - Post Generator")
+    parser.add_argument("--theme", type=str, default=None, help="Özel tema gir")
+    parser.add_argument("--dry-run", action="store_true", help="Supabase'e kaydetme")
+    parser.add_argument("--recent", action="store_true", help="Son 5 postu listele")
+    args = parser.parse_args()
+
+    if args.recent:
+        supabase, _ = init_services()
+        posts = fetch_recent_posts(supabase)
+        print(f"\n📋 Son {len(posts)} post:")
+        for p in posts:
+            print(f"  [{p.get('id')}] {p.get('mood')} | {p.get('status')} | {p.get('created_at','')[:16]}")
+    else:
+        run(theme=args.theme, dry_run=args.dry_run)
