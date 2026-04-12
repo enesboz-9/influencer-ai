@@ -1,0 +1,122 @@
+"""
+Ece AI — Zamanlayıcı (Scheduler)
+Belirlenen saatlerde otomatik post üretir ve Supabase'e kaydeder.
+"""
+
+import schedule
+import time
+import logging
+import random
+from datetime import datetime
+
+from ece_ai import run, init_services, fetch_recent_posts
+
+# --- LOGGING ---
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S"
+)
+log = logging.getLogger(__name__)
+
+# --- GÜNLÜK PAYLAŞIM TAKVİMİ ---
+# Saat: (tema힌트 veya None=rastgele)
+DAILY_SCHEDULE = {
+    "09:00": "Sabah rutini, kahve, güne başlangıç",
+    "13:00": None,   # öğle — tamamen rastgele
+    "19:00": "Akşam refleksiyonu, günün özeti, İstanbul'dan bir an",
+}
+
+# Haftanın kaç günü post atılsın (0=Pzt ... 6=Paz)
+ACTIVE_DAYS = [0, 1, 2, 3, 4, 5, 6]  # her gün — istersen kısalt
+
+
+def should_post_today() -> bool:
+    return datetime.now().weekday() in ACTIVE_DAYS
+
+
+def job(theme: str | None = None, label: str = ""):
+    if not should_post_today():
+        log.info(f"⏭️  Bugün ({datetime.now().strftime('%A')}) aktif gün değil, atlandı.")
+        return
+
+    log.info(f"⏰ Zamanlı görev tetiklendi — {label or 'rastgele tema'}")
+    post = run(theme=theme)
+
+    if post:
+        log.info(f"✅ Post üretildi ve kaydedildi. Mood: {post.mood}")
+    else:
+        log.warning("⚠️  Post üretilemedi, bir sonraki saatte tekrar denenecek.")
+
+
+def setup_schedule():
+    """Tüm zamanlanmış görevleri kayıt eder."""
+    for saat, tema in DAILY_SCHEDULE.items():
+        label = tema[:40] if tema else "rastgele"
+        # Her görev için closure düzgün çalışsın diye default arg kullan
+        schedule.every().day.at(saat).do(job, theme=tema, label=label)
+        log.info(f"📅 Zamanlandı → {saat} | Tema: {label}")
+
+
+def show_status():
+    """Bir sonraki görevleri gösterir."""
+    print("\n" + "="*50)
+    print("📋 ZAMANLANMIŞ GÖREVLER")
+    print("="*50)
+    for job_item in schedule.get_jobs():
+        print(f"  ⏰ {job_item.next_run.strftime('%H:%M')} — {job_item.tags}")
+    print("="*50 + "\n")
+
+
+def run_scheduler():
+    """Ana zamanlayıcı döngüsü."""
+    log.info("🚀 Ece AI Zamanlayıcı başlatılıyor...")
+
+    # Servis kontrolü
+    try:
+        init_services()
+    except Exception as e:
+        log.error(f"❌ Servis hatası: {e}")
+        return
+
+    setup_schedule()
+    show_status()
+
+    log.info("✅ Zamanlayıcı aktif. Çıkmak için CTRL+C")
+
+    try:
+        while True:
+            schedule.run_pending()
+            time.sleep(30)  # her 30 saniyede kontrol et
+    except KeyboardInterrupt:
+        log.info("👋 Zamanlayıcı durduruldu.")
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Ece AI — Zamanlayıcı")
+    parser.add_argument("--now",    action="store_true", help="Hemen bir post üret (test)")
+    parser.add_argument("--status", action="store_true", help="Son postları göster")
+    args = parser.parse_args()
+
+    if args.now:
+        log.info("⚡ Manuel tetikleme...")
+        job(label="manuel test")
+
+    elif args.status:
+        supabase, _ = init_services()
+        posts = fetch_recent_posts(supabase, limit=10)
+        print(f"\n📋 Son {len(posts)} post:")
+        print(f"{'ID':<5} {'Mood':<12} {'Status':<12} {'Tarih':<20}")
+        print("-" * 52)
+        for p in posts:
+            print(
+                f"  {p.get('id','?'):<5}"
+                f"{p.get('mood','?'):<12}"
+                f"{p.get('status','?'):<12}"
+                f"{p.get('created_at','')[:16]}"
+            )
+
+    else:
+        run_scheduler()
