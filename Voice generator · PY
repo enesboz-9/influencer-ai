@@ -1,0 +1,214 @@
+"""
+Ece AI — Ses Üretici (ElevenLabs TTS)
+Caption'ları otomatik olarak Ece'nin sesiyle sese çevirir.
+"""
+
+import os
+import logging
+import requests
+from pathlib import Path
+from datetime import datetime
+from dotenv import load_dotenv
+
+load_dotenv()
+
+log = logging.getLogger(__name__)
+
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "").strip()
+ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "SMRHdMmNcA5RcHlk7xCP").strip()
+
+AUDIO_OUTPUT_DIR = Path("audio_outputs")
+AUDIO_OUTPUT_DIR.mkdir(exist_ok=True)
+
+
+# ─────────────────────────────────────────────
+# CAPTION → SES
+# ─────────────────────────────────────────────
+
+def caption_to_speech(
+    caption: str,
+    output_filename: str | None = None,
+    stability: float = 0.5,
+    similarity_boost: float = 0.85,
+    style: float = 0.3,
+) -> Path | None:
+    """
+    ElevenLabs API ile caption'ı sese çevirir ve .mp3 olarak kaydeder.
+
+    Args:
+        caption:          Sese çevrilecek metin
+        output_filename:  Çıktı dosya adı (None ise otomatik oluşturulur)
+        stability:        Ses tutarlılığı (0-1, yüksek = daha tutarlı)
+        similarity_boost: Sese benzerlik (0-1, yüksek = daha benzer)
+        style:            Stil yoğunluğu (0-1, yüksek = daha dramatik)
+
+    Returns:
+        Kaydedilen .mp3 dosyasının Path'i veya None
+    """
+    if not ELEVENLABS_API_KEY:
+        log.error("❌ ELEVENLABS_API_KEY bulunamadı.")
+        return None
+
+    # Hashtagleri temizle — sesli okumada gereksiz
+    clean_text = _clean_caption_for_speech(caption)
+
+    url = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE_ID}"
+
+    headers = {
+        "xi-api-key": ELEVENLABS_API_KEY,
+        "Content-Type": "application/json",
+    }
+
+    payload = {
+        "text": clean_text,
+        "model_id": "eleven_multilingual_v2",  # Türkçe için en iyi model
+        "voice_settings": {
+            "stability": stability,
+            "similarity_boost": similarity_boost,
+            "style": style,
+            "use_speaker_boost": True,
+        }
+    }
+
+    log.info(f"🎙️  Ses üretiliyor... ({len(clean_text)} karakter)")
+
+    resp = requests.post(url, json=payload, headers=headers, timeout=30)
+
+    if resp.status_code != 200:
+        log.error(f"❌ ElevenLabs hata: {resp.status_code} — {resp.text}")
+        return None
+
+    # Dosyaya kaydet
+    if not output_filename:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_filename = f"ece_{timestamp}.mp3"
+
+    output_path = AUDIO_OUTPUT_DIR / output_filename
+
+    with open(output_path, "wb") as f:
+        f.write(resp.content)
+
+    log.info(f"✅ Ses kaydedildi: {output_path}")
+    return output_path
+
+
+def _clean_caption_for_speech(caption: str) -> str:
+    """Caption'daki hashtagleri ve gereksiz karakterleri temizler."""
+    import re
+    # Hashtagleri kaldır
+    text = re.sub(r"#\w+", "", caption)
+    # Fazla boşlukları temizle
+    text = re.sub(r"\s+", " ", text).strip()
+    # Emoji'leri bırak — ElevenLabs onları zaten yoksayar
+    return text
+
+
+# ─────────────────────────────────────────────
+# SUPABASE'DEN CAPTION'LARI ÇEK VE SESLENDİR
+# ─────────────────────────────────────────────
+
+def process_pending_audio(supabase) -> None:
+    """
+    Supabase'de audio_url'i olmayan hazır postları bulur,
+    seslendirir ve günceller.
+    """
+    result = (
+        supabase.table("ece_posts")
+        .select("id, caption, mood")
+        .eq("status", "ready")
+        .is_("audio_url", "null")
+        .limit(5)
+        .execute()
+    )
+
+    posts = result.data or []
+
+    if not posts:
+        log.info("ℹ️  Seslendirilecek post yok.")
+        return
+
+    log.info(f"📋 {len(posts)} post seslendirilecek...")
+
+    for post in posts:
+        post_id = post["id"]
+        caption = post["caption"]
+
+        log.info(f"\n🎙️  Post #{post_id} işleniyor...")
+
+        filename = f"ece_post_{post_id}.mp3"
+        audio_path = caption_to_speech(caption, output_filename=filename)
+
+        if audio_path:
+            # Supabase Storage'a yükle
+            audio_url = upload_audio_to_supabase(supabase, audio_path, filename)
+
+            if audio_url:
+                supabase.table("ece_posts").update({
+                    "audio_url": audio_url
+                }).eq("id", post_id).execute()
+                log.info(f"✅ Post #{post_id} audio_url güncellendi.")
+        else:
+            log.warning(f"⚠️  Post #{post_id} seslendirilemedi.")
+
+
+def upload_audio_to_supabase(supabase, audio_path: Path, filename: str) -> str | None:
+    """MP3 dosyasını Supabase Storage'a yükler ve public URL döner."""
+    try:
+        with open(audio_path, "rb") as f:
+            audio_data = f.read()
+
+        supabase.storage.from_("ece-audio").upload(
+            path=filename,
+            file=audio_data,
+            file_options={"content-type": "audio/mpeg"}
+        )
+
+        # Public URL al
+        url_data = supabase.storage.from_("ece-audio").get_public_url(filename)
+        return url_data
+
+    except Exception as e:
+        log.error(f"❌ Supabase Storage yükleme hatası: {e}")
+        return None
+
+
+# ─────────────────────────────────────────────
+# ENTRY POINT
+# ─────────────────────────────────────────────
+
+if __name__ == "__main__":
+    import argparse
+    from ece_ai import init_services
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%H:%M:%S"
+    )
+
+    parser = argparse.ArgumentParser(description="Ece AI — Ses Üretici")
+    parser.add_argument("--text",    type=str, help="Direkt metin seslendirme (test)")
+    parser.add_argument("--pending", action="store_true", help="Bekleyen postları seslendir")
+    args = parser.parse_args()
+
+    if args.text:
+        path = caption_to_speech(args.text, output_filename="test_ses.mp3")
+        if path:
+            print(f"\n🎵 Ses dosyası: {path}")
+
+    elif args.pending:
+        supabase, _ = init_services()
+        process_pending_audio(supabase)
+
+    else:
+        # Varsayılan: örnek caption ile test
+        test_caption = (
+            "Bugün stüdyoda çalışırken fark ettim ki en iyi fikirler "
+            "genellikle sabah kahvesinin ilk yudumunda geliyor. ☕ "
+            "Bazen durup etrafına bakmak, her şeyi değiştirebilir."
+        )
+        print("🎙️  Test caption seslendiriliyor...\n")
+        path = caption_to_speech(test_caption, output_filename="ece_test.mp3")
+        if path:
+            print(f"\n✅ Ses dosyası hazır: {path}")
+            print("📂 'audio_outputs' klasörünü kontrol et.")
