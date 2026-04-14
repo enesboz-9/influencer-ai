@@ -1,0 +1,302 @@
+"use client";
+
+import { useEffect, useState } from "react";
+import { supabase } from "@/lib/supabase";
+
+interface Musteri { id: string; ad_soyad: string; telefon: string; }
+interface Personel { id: string; ad: string; uzmanlik: string; }
+interface Isletme { id: string; ad: string; isletme_turu: string; }
+interface Randevu {
+  id: string;
+  baslangic: string;
+  bitis: string;
+  hizmet_turu: string;
+  durum: string;
+  notlar: string;
+  musteriler: { ad_soyad: string } | null;
+  personeller: { ad: string } | null;
+}
+
+const HIZMETLER: Record<string, string[]> = {
+  kuafor: ["Saç Kesim", "Saç Boyama", "Fön", "Keratin", "Röfle", "Manikür", "Pedikür"],
+  tamirci: ["Ekran Değişimi", "Batarya", "Şarj Soketi", "Klavye", "Yazılım", "Genel Bakım"],
+  restoran: ["Masa Rezervasyonu", "Özel Etkinlik", "İş Yemeği"],
+};
+
+const DURUM_MAP: Record<string, { bg: string; color: string; etiket: string }> = {
+  bekliyor:   { bg: "#FAEEDA", color: "#633806", etiket: "Bekliyor" },
+  tamamlandi: { bg: "#E1F5EE", color: "#085041", etiket: "Tamamlandı" },
+  iptal:      { bg: "#FCEBEB", color: "#791F1F", etiket: "İptal" },
+};
+
+export default function RandevularPage() {
+  const [isletmeler, setIsletmeler] = useState<Isletme[]>([]);
+  const [seciliIsletme, setSeciliIsletme] = useState<Isletme | null>(null);
+  const [musteriler, setMusteriler] = useState<Musteri[]>([]);
+  const [personeller, setPersoneller] = useState<Personel[]>([]);
+  const [randevular, setRandevular] = useState<Randevu[]>([]);
+  const [formAcik, setFormAcik] = useState(false);
+  const [yukleniyor, setYukleniyor] = useState(false);
+  const [basari, setBasari] = useState("");
+  const [hata, setHata] = useState("");
+  const [seciliTarih, setSeciliTarih] = useState(
+    new Date().toISOString().split("T")[0]
+  );
+  const [form, setForm] = useState({
+    musteri_id: "", personel_id: "",
+    baslangic: "", hizmet_turu: "", notlar: "",
+  });
+
+  useEffect(() => {
+    supabase.from("isletmeler").select("*").eq("aktif", true).then(({ data }) => {
+      if (data && data.length > 0) {
+        setIsletmeler(data);
+        setSeciliIsletme(data[0]);
+      }
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!seciliIsletme) return;
+    supabase.from("musteriler").select("id, ad_soyad, telefon")
+      .eq("isletme_id", seciliIsletme.id)
+      .then(({ data }) => setMusteriler((data as Musteri[]) ?? []));
+    supabase.from("personeller").select("id, ad, uzmanlik")
+      .eq("isletme_id", seciliIsletme.id).eq("aktif", true)
+      .then(({ data }) => setPersoneller((data as Personel[]) ?? []));
+    randevulariYukle();
+  }, [seciliIsletme, seciliTarih]);
+
+  async function randevulariYukle() {
+    if (!seciliIsletme) return;
+    const baslangic = new Date(seciliTarih);
+    baslangic.setHours(0, 0, 0, 0);
+    const bitis = new Date(seciliTarih);
+    bitis.setHours(23, 59, 59, 999);
+    const { data } = await supabase
+      .from("randevular")
+      .select("*, musteriler(ad_soyad), personeller(ad)")
+      .eq("isletme_id", seciliIsletme.id)
+      .gte("baslangic", baslangic.toISOString())
+      .lte("baslangic", bitis.toISOString())
+      .order("baslangic");
+    setRandevular((data as Randevu[]) ?? []);
+  }
+
+  async function randevuEkle() {
+    setHata("");
+    if (!form.musteri_id || !form.baslangic || !form.hizmet_turu) {
+      setHata("Müşteri, tarih/saat ve hizmet zorunludur."); return;
+    }
+    setYukleniyor(true);
+    const baslangicISO = new Date(`${seciliTarih}T${form.baslangic}`).toISOString();
+    const { error } = await supabase.from("randevular").insert({
+      isletme_id: seciliIsletme?.id,
+      musteri_id: form.musteri_id,
+      personel_id: form.personel_id || null,
+      baslangic: baslangicISO,
+      hizmet_turu: form.hizmet_turu,
+      notlar: form.notlar,
+      durum: "bekliyor",
+    });
+    setYukleniyor(false);
+    if (error) { setHata("Hata: " + error.message); return; }
+    setBasari("Randevu eklendi!");
+    setForm({ musteri_id: "", personel_id: "", baslangic: "", hizmet_turu: "", notlar: "" });
+    setFormAcik(false);
+    setTimeout(() => setBasari(""), 3000);
+    randevulariYukle();
+  }
+
+  async function durumGuncelle(id: string, durum: string) {
+    await supabase.from("randevular").update({ durum }).eq("id", id);
+    randevulariYukle();
+  }
+
+  const hizmetler = HIZMETLER[seciliIsletme?.isletme_turu ?? "kuafor"] ?? [];
+
+  return (
+    <div style={{
+      minHeight: "100vh", background: "var(--color-background-tertiary)",
+      fontFamily: "var(--font-sans)", paddingBottom: 40,
+    }}>
+      {/* Üst Bar */}
+      <div style={{
+        background: "var(--color-background-primary)",
+        borderBottom: "0.5px solid var(--color-border-tertiary)",
+        padding: "0 24px", height: 56,
+        display: "flex", alignItems: "center", justifyContent: "space-between",
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <a href="/" style={{ fontSize: 13, color: "var(--color-text-secondary)", textDecoration: "none" }}>
+            ← Dashboard
+          </a>
+          <span style={{ color: "var(--color-border-secondary)" }}>|</span>
+          <span style={{ fontWeight: 500, fontSize: 15 }}>Randevular</span>
+        </div>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <input
+            type="date" value={seciliTarih}
+            onChange={(e) => setSeciliTarih(e.target.value)}
+            style={{
+              fontSize: 13, padding: "6px 12px",
+              border: "0.5px solid var(--color-border-secondary)",
+              borderRadius: 8, background: "var(--color-background-primary)",
+              color: "var(--color-text-primary)", cursor: "pointer",
+            }}
+          />
+          <select
+            value={seciliIsletme?.id ?? ""}
+            onChange={(e) => {
+              const i = isletmeler.find((x) => x.id === e.target.value);
+              if (i) setSeciliIsletme(i);
+            }}
+            style={{
+              fontSize: 13, padding: "6px 12px",
+              border: "0.5px solid var(--color-border-secondary)",
+              borderRadius: 8, background: "var(--color-background-primary)",
+              color: "var(--color-text-primary)", cursor: "pointer",
+            }}
+          >
+            {isletmeler.map((i) => <option key={i.id} value={i.id}>{i.ad}</option>)}
+          </select>
+        </div>
+      </div>
+
+      <div style={{ maxWidth: 800, margin: "0 auto", padding: "24px 16px" }}>
+        {basari && (
+          <div style={{
+            background: "#E1F5EE", color: "#085041",
+            padding: "12px 16px", borderRadius: 10, marginBottom: 16, fontSize: 13,
+          }}>{basari}</div>
+        )}
+
+        <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 16 }}>
+          <button onClick={() => setFormAcik(!formAcik)} style={{
+            padding: "10px 20px", background: "#993556", color: "#fff",
+            border: "none", borderRadius: 10, fontWeight: 500, fontSize: 13, cursor: "pointer",
+          }}>
+            + Yeni Randevu
+          </button>
+        </div>
+
+        {/* Yeni Randevu Formu */}
+        {formAcik && (
+          <div style={{
+            background: "var(--color-background-primary)",
+            border: "0.5px solid var(--color-border-tertiary)",
+            borderRadius: 12, padding: "20px 24px", marginBottom: 20,
+          }}>
+            <div style={{ fontWeight: 500, fontSize: 14, marginBottom: 16 }}>Yeni Randevu</div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 12 }}>
+              <div>
+                <label style={{ fontSize: 12, color: "var(--color-text-secondary)", display: "block", marginBottom: 5 }}>Müşteri *</label>
+                <select value={form.musteri_id} onChange={(e) => setForm({ ...form, musteri_id: e.target.value })}
+                  style={{ width: "100%", padding: "9px 12px", border: "0.5px solid var(--color-border-secondary)", borderRadius: 8, fontSize: 13, background: "var(--color-background-primary)", color: "var(--color-text-primary)", boxSizing: "border-box" }}>
+                  <option value="">Müşteri seçin</option>
+                  {musteriler.map((m) => <option key={m.id} value={m.id}>{m.ad_soyad}</option>)}
+                </select>
+              </div>
+              <div>
+                <label style={{ fontSize: 12, color: "var(--color-text-secondary)", display: "block", marginBottom: 5 }}>Saat *</label>
+                <input type="time" value={form.baslangic} onChange={(e) => setForm({ ...form, baslangic: e.target.value })}
+                  style={{ width: "100%", padding: "9px 12px", border: "0.5px solid var(--color-border-secondary)", borderRadius: 8, fontSize: 13, background: "var(--color-background-primary)", color: "var(--color-text-primary)", boxSizing: "border-box" }} />
+              </div>
+              <div>
+                <label style={{ fontSize: 12, color: "var(--color-text-secondary)", display: "block", marginBottom: 5 }}>Hizmet *</label>
+                <select value={form.hizmet_turu} onChange={(e) => setForm({ ...form, hizmet_turu: e.target.value })}
+                  style={{ width: "100%", padding: "9px 12px", border: "0.5px solid var(--color-border-secondary)", borderRadius: 8, fontSize: 13, background: "var(--color-background-primary)", color: "var(--color-text-primary)", boxSizing: "border-box" }}>
+                  <option value="">Hizmet seçin</option>
+                  {hizmetler.map((h) => <option key={h} value={h}>{h}</option>)}
+                </select>
+              </div>
+              <div>
+                <label style={{ fontSize: 12, color: "var(--color-text-secondary)", display: "block", marginBottom: 5 }}>Personel</label>
+                <select value={form.personel_id} onChange={(e) => setForm({ ...form, personel_id: e.target.value })}
+                  style={{ width: "100%", padding: "9px 12px", border: "0.5px solid var(--color-border-secondary)", borderRadius: 8, fontSize: 13, background: "var(--color-background-primary)", color: "var(--color-text-primary)", boxSizing: "border-box" }}>
+                  <option value="">Personel seçin</option>
+                  {personeller.map((p) => <option key={p.id} value={p.id}>{p.ad}</option>)}
+                </select>
+              </div>
+            </div>
+            <div style={{ marginBottom: 16 }}>
+              <label style={{ fontSize: 12, color: "var(--color-text-secondary)", display: "block", marginBottom: 5 }}>Not</label>
+              <input value={form.notlar} onChange={(e) => setForm({ ...form, notlar: e.target.value })}
+                placeholder="Ek notlar..."
+                style={{ width: "100%", padding: "9px 12px", border: "0.5px solid var(--color-border-secondary)", borderRadius: 8, fontSize: 13, background: "var(--color-background-primary)", color: "var(--color-text-primary)", boxSizing: "border-box" }} />
+            </div>
+            {hata && <div style={{ background: "#FCEBEB", color: "#791F1F", fontSize: 13, padding: "10px 14px", borderRadius: 8, marginBottom: 12 }}>{hata}</div>}
+            <div style={{ display: "flex", gap: 8 }}>
+              <button onClick={randevuEkle} disabled={yukleniyor} style={{
+                padding: "10px 20px", background: "#993556", color: "#fff",
+                border: "none", borderRadius: 8, fontWeight: 500, fontSize: 13, cursor: "pointer",
+              }}>{yukleniyor ? "Kaydediliyor..." : "Randevu Ekle"}</button>
+              <button onClick={() => { setFormAcik(false); setHata(""); }} style={{
+                padding: "10px 20px", background: "transparent",
+                border: "0.5px solid var(--color-border-secondary)",
+                borderRadius: 8, fontSize: 13, cursor: "pointer", color: "var(--color-text-secondary)",
+              }}>İptal</button>
+            </div>
+          </div>
+        )}
+
+        {/* Randevu Listesi */}
+        <div style={{
+          background: "var(--color-background-primary)",
+          border: "0.5px solid var(--color-border-tertiary)",
+          borderRadius: 12, overflow: "hidden",
+        }}>
+          <div style={{ padding: "14px 20px", borderBottom: "0.5px solid var(--color-border-tertiary)", fontSize: 13, color: "var(--color-text-secondary)" }}>
+            {new Date(seciliTarih).toLocaleDateString("tr-TR", { weekday: "long", day: "numeric", month: "long" })} — {randevular.length} randevu
+          </div>
+          {randevular.length === 0 ? (
+            <div style={{ padding: 32, textAlign: "center", color: "var(--color-text-tertiary)", fontSize: 13 }}>
+              Bu tarihte randevu yok.
+            </div>
+          ) : randevular.map((r) => {
+            const d = DURUM_MAP[r.durum] ?? DURUM_MAP.bekliyor;
+            return (
+              <div key={r.id} style={{
+                padding: "14px 20px",
+                borderBottom: "0.5px solid var(--color-border-tertiary)",
+                display: "flex", alignItems: "center", gap: 14,
+              }}>
+                <div style={{
+                  width: 44, height: 44, borderRadius: 10,
+                  background: "#FBEAF0", display: "flex",
+                  alignItems: "center", justifyContent: "center",
+                  fontSize: 12, fontWeight: 500, color: "#993556", flexShrink: 0,
+                }}>
+                  {new Date(r.baslangic).toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit" })}
+                </div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontWeight: 500, fontSize: 14 }}>{r.musteriler?.ad_soyad ?? "Müşteri"}</div>
+                  <div style={{ fontSize: 12, color: "var(--color-text-secondary)" }}>
+                    {r.hizmet_turu}{r.personeller?.ad ? ` · ${r.personeller.ad}` : ""}
+                  </div>
+                </div>
+                <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                  <span style={{ background: d.bg, color: d.color, fontSize: 11, fontWeight: 500, padding: "2px 10px", borderRadius: 20 }}>
+                    {d.etiket}
+                  </span>
+                  {r.durum === "bekliyor" && (
+                    <>
+                      <button onClick={() => durumGuncelle(r.id, "tamamlandi")} style={{
+                        fontSize: 11, padding: "3px 10px", borderRadius: 20,
+                        background: "#E1F5EE", color: "#085041", border: "none", cursor: "pointer", fontWeight: 500,
+                      }}>Tamamla</button>
+                      <button onClick={() => durumGuncelle(r.id, "iptal")} style={{
+                        fontSize: 11, padding: "3px 10px", borderRadius: 20,
+                        background: "#FCEBEB", color: "#791F1F", border: "none", cursor: "pointer", fontWeight: 500,
+                      }}>İptal</button>
+                    </>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
